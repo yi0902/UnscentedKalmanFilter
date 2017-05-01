@@ -180,11 +180,12 @@ void UKF::Prediction(double delta_t) {
   MatrixXd L = P_aug.llt().matrixL();
   
   // create augmented sigma points
+  double const sqrt_lambda = sqrt(lambda_ + n_aug_);
   Xsig_aug.col(0)  = x_aug;
   for (int i = 0; i < n_aug_; i++)
   {
-    Xsig_aug.col(i+1)       = x_aug + sqrt(lambda_ + n_aug_) * L.col(i);
-    Xsig_aug.col(i+1+n_aug_) = x_aug - sqrt(lambda_ + n_aug_) * L.col(i);
+    Xsig_aug.col(i+1)       = x_aug + sqrt_lambda * L.col(i);
+    Xsig_aug.col(i+1+n_aug_) = x_aug - sqrt_lambda * L.col(i);
   }
   
   //**** predict sigma points ******************************
@@ -192,13 +193,13 @@ void UKF::Prediction(double delta_t) {
   for (int i = 0; i < 2 * n_aug_ + 1; i++)
   {
     // extract values for better readability
-    double p_x = Xsig_aug(0,i);
-    double p_y = Xsig_aug(1,i);
-    double v = Xsig_aug(2,i);
-    double yaw = Xsig_aug(3,i);
-    double yawd = Xsig_aug(4,i);
-    double nu_a = Xsig_aug(5,i);
-    double nu_yawdd = Xsig_aug(6,i);
+    double const p_x = Xsig_aug(0,i);
+    double const p_y = Xsig_aug(1,i);
+    double const v = Xsig_aug(2,i);
+    double const yaw = Xsig_aug(3,i);
+    double const yawd = Xsig_aug(4,i);
+    double const nu_a = Xsig_aug(5,i);
+    double const nu_yawdd = Xsig_aug(6,i);
     
     // predicted state values
     double px_p, py_p;
@@ -262,74 +263,34 @@ void UKF::Prediction(double delta_t) {
  * @param {MeasurementPackage} meas_package
  */
 void UKF::UpdateLidar(MeasurementPackage meas_package) {
-  
+    
   // set measurement dimension, lidar can measure px, and py
   int n_z = 2;
   
-  // create matrix for sigma points in measurement space
-  MatrixXd Zsig = MatrixXd(n_z, 2 * n_aug_ + 1);
-  
-  // create matrix for cross correlation Tc
-  MatrixXd Tc = MatrixXd(n_x_, n_z);
-  
-  // **** transform sigma points into measurement space *************************
-  
-  for (int i = 0; i < 2 * n_aug_ + 1; i++) {
-    // measurement model
-    Zsig(0,i) = Xsig_pred_(0,i);
-    Zsig(1,i) = Xsig_pred_(1,i);
-  }
-  
-  // mean predicted measurement
-  VectorXd z_pred = VectorXd(n_z);
-  z_pred.fill(0.0);
-  for (int i=0; i < 2 * n_aug_ + 1; i++) {
-    z_pred = z_pred + weights_(i) * Zsig.col(i);
-  }
-  
-  // store z_diff to avoid repeatitive computations
-  MatrixXd z_diff = MatrixXd(n_z, 2 * n_aug_ + 1);
-  for (int i = 0; i < 2 * n_aug_ + 1; i++) {
-    // residual
-    VectorXd z_diff_tmp = Zsig.col(i) - z_pred;
-    // store to z_diff
-    z_diff.col(i) = z_diff_tmp;
-  }
-  
-  // measurement covariance matrix S
-  MatrixXd S = MatrixXd(n_z,n_z);
-  S.fill(0.0);
-  for (int i = 0; i < 2 * n_aug_ + 1; i++) {
-    S = S + weights_(i) * z_diff.col(i) * z_diff.col(i).transpose();
-  }
-  
   // add measurement noise covariance matrix
-  MatrixXd R = MatrixXd(n_z,n_z);
+  MatrixXd R = MatrixXd(n_z, n_z);
   R <<  std_laspx_ * std_laspx_, 0,
         0, std_laspy_  * std_laspy_;
-  S = S + R;
   
-  // **** update state mean and covariance matrix *************************
+  // add measurement matrix
+  MatrixXd H_laser = MatrixXd(n_z, n_x_);
+  H_laser << 1, 0, 0, 0, 0,
+             0, 1, 0, 0, 0;
   
-  // calculate cross correlation matrix
-  Tc.fill(0.0);
-  for (int i = 0; i < 2 * n_aug_ + 1; i++) {
-    VectorXd x_diff = Xsig_pred_.col(i) - x_;
-    Tc = Tc + weights_(i) * x_diff * z_diff.col(i).transpose();
-  }
+  VectorXd z_pred = H_laser * x_;
+  VectorXd y = meas_package.raw_measurements_ - z_pred;
+  MatrixXd Ht = H_laser.transpose();
+  MatrixXd S = H_laser * P_ * Ht + R;
+  MatrixXd Si = S.inverse();
+  MatrixXd K = P_ * Ht * Si;
   
-  // Kalman gain K;
-  MatrixXd K = Tc * S.inverse();
+  // update new estimate
+  x_ = x_ + (K * y);
+  MatrixXd I = MatrixXd::Identity(n_x_, n_x_);
+  P_ = (I - K * H_laser) * P_;
   
-  // residual
-  VectorXd z_diff_real = meas_package.raw_measurements_ - z_pred;
-  
-  // update state mean and covariance matrix
-  x_ = x_ + K * z_diff_real;
-  P_ = P_ - K * S * K.transpose();
-  
-  // **** calculate the lidar NIS ********************************************
-  NIS_laser_ = z_diff_real.transpose() * S.inverse() * z_diff_real;
+  // calculate the lidar NIS
+  NIS_laser_ = y.transpose() * Si * y;
   //if(NIS_laser_ > 5.991){
   //  cout << "Lidar NIS = " << NIS_laser_ << endl;
   //}
@@ -370,8 +331,9 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
       // avoid division by 0
       Zsig(0,i) =0.001;
     };
+    // TODO: if p_y = 0 and p_x = 0
     Zsig(1,i) = atan2(p_y, p_x);                                      //phi
-    Zsig(2,i) = (p_x * v1 + p_y * v2) / sqrt(p_x * p_x + p_y * p_y);  //r_dot
+    Zsig(2,i) = (p_x * v1 + p_y * v2) / Zsig(0,i) ;                   //r_dot
   }
   
   // mean predicted measurement
